@@ -41,7 +41,7 @@ export default function Hero({ ready }) {
   }, { scope: root, dependencies: [ready] })
 
   return (
-    <section id="top" className="hero" ref={root}>
+    <section id="top" className="hero" ref={root} data-tone="dark">
       <div className="hero-stage">
         <canvas ref={canvas} className="hero-canvas" aria-hidden="true" />
 

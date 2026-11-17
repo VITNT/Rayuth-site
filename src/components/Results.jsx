@@ -56,31 +56,51 @@ export default function Results() {
     gsap.from(q('.rs-kpi'), { y: 50, autoAlpha: 0, stagger: 0.08, duration: 1, ease: 'expo.out', scrollTrigger: { trigger: q('.rs-kpis')[0], start: 'top 85%' } })
   }, { scope: root })
 
-  // floating photo preview that follows the cursor across rows
+  // floating photo preview that follows the cursor across rows.
+  // Hover state is derived from what's actually under the pointer (on move AND scroll),
+  // so fast scrolling can't leave a stale preview on screen.
   useEffect(() => {
     if (isTouch()) return
     const p = preview.current
+    const imgs = p.querySelectorAll('img')
     const xTo = gsap.quickTo(p, 'x', { duration: 0.6, ease: 'power3' })
     const yTo = gsap.quickTo(p, 'y', { duration: 0.6, ease: 'power3' })
     const rTo = gsap.quickTo(p, 'rotation', { duration: 0.8, ease: 'power3' })
-    let lx = 0, ly = 0
-    const move = (e) => { xTo(e.clientX); yTo(e.clientY); rTo(gsap.utils.clamp(-12, 12, (e.clientX - lx) * 0.6)); lx = e.clientX; ly = e.clientY }
-    // scrolling away without moving the pointer should still hide the preview
-    const onScroll = () => {
-      const r = root.current.querySelector('.rs-table').getBoundingClientRect()
-      if (ly < r.top || ly > r.bottom) hide()
-    }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('scroll', onScroll) }
-  }, [])
+    let lx = -1, ly = -1, active = null, raf = 0
 
-  const show = (r) => {
-    const imgs = preview.current.querySelectorAll('img')
-    imgs.forEach((img) => gsap.to(img, { autoAlpha: img.dataset.src === r.img ? 1 : 0, scale: img.dataset.src === r.img ? 1 : 1.2, duration: 0.5 }))
-    gsap.to(preview.current, { scale: 1, autoAlpha: 1, duration: 0.5, ease: 'expo.out' })
-  }
-  const hide = () => gsap.to(preview.current, { scale: 0.6, autoAlpha: 0, duration: 0.4, ease: 'power3.in', overwrite: 'auto' })
+    const show = (img) => {
+      imgs.forEach((el) => gsap.to(el, { autoAlpha: el.dataset.src === img ? 1 : 0, scale: el.dataset.src === img ? 1 : 1.2, duration: 0.5, overwrite: 'auto' }))
+      gsap.to(p, { scale: 1, autoAlpha: 1, duration: 0.5, ease: 'expo.out', overwrite: 'auto' })
+    }
+    const hide = () => gsap.to(p, { scale: 0.8, autoAlpha: 0, duration: 0.2, ease: 'power2.out', overwrite: 'auto' })
+
+    const sync = () => {
+      raf = 0
+      const el = lx < 0 ? null : document.elementFromPoint(lx, ly)
+      const row = el && root.current.contains(el) ? el.closest('.rs-row[data-img]') : null
+      const img = row ? row.dataset.img : null
+      if (img === active) return
+      active = img
+      img ? show(img) : hide()
+    }
+    const queue = () => { if (!raf) raf = requestAnimationFrame(sync) }
+
+    const move = (e) => {
+      xTo(e.clientX); yTo(e.clientY); rTo(gsap.utils.clamp(-12, 12, (e.clientX - lx) * 0.6))
+      lx = e.clientX; ly = e.clientY
+      queue()
+    }
+    const leave = () => { lx = ly = -1; queue() }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('scroll', queue, { passive: true })
+    document.documentElement.addEventListener('pointerleave', leave)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('scroll', queue)
+      document.documentElement.removeEventListener('pointerleave', leave)
+    }
+  }, [])
 
   const slowest50 = Math.max(...results.map(per50))
 
@@ -99,7 +119,7 @@ export default function Results() {
         <div className="rs-kpi"><span className="label">Latest PB</span><strong className="rs-kpi-date">{fmtDate(latestPB.date, { day: '2-digit', month: 'short' })}</strong></div>
       </div>
 
-      <div className="rs-table" role="table" aria-label="Personal best times" onPointerLeave={hide}>
+      <div className="rs-table" role="table" aria-label="Personal best times">
         <div className="rs-row rs-row-head" role="row">
           <span className="rs-line" />
           <span className="rs-cell label" role="columnheader">#</span>
@@ -109,7 +129,7 @@ export default function Results() {
           <span className="rs-cell label rs-hide-sm" role="columnheader">Date</span>
         </div>
         {results.map((r, i) => (
-          <div className="rs-row" role="row" key={r.event} onPointerEnter={() => show(r)} data-cursor={r.stroke}>
+          <div className="rs-row" role="row" key={r.event} data-img={r.img} data-cursor={r.stroke}>
             <span className="rs-line" />
             <span className="rs-cell rs-idx" role="cell">{String(i + 1).padStart(2, '0')}</span>
             <span className="rs-cell rs-event" role="cell">

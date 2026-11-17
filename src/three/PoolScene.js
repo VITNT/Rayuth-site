@@ -1,47 +1,44 @@
 import * as THREE from 'three'
 
-// Ripple behavior based on Christian Ortiz's Mouse Effects demo:
-// https://github.com/cortiz2894/mouse-effects
+// Ripples: drop-based heightfield sim (pointer trail drops + click splash), softened.
 const quadVert = /* glsl */ `
   varying vec2 vUv;
   void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
 `
 
-const SIMULATION_STEP = 1 / 60
+const SIMULATION_STEP = 1 / 120
+const MAX_DROPS = 24
 
 const simFrag = /* glsl */ `
-  uniform sampler2D uState;
+  precision highp float;
+  uniform sampler2D uPrev;
   uniform vec2 uTexel;
   uniform float uAspect;
-  uniform vec2 uPointer;
-  uniform vec2 uPreviousPointer;
-  uniform vec3 uTap;
+  uniform vec4 uDrops[${MAX_DROPS}];
+  uniform int uCount;
   varying vec2 vUv;
-
+  const float PI = 3.14159265;
   void main() {
-    // The red and green channels hold the current and preceding wave heights.
-    vec2 height = texture2D(uState, vUv).rg;
+    vec4 info = texture2D(uPrev, vUv);
     vec2 dx = vec2(uTexel.x, 0.0);
     vec2 dy = vec2(0.0, uTexel.y);
-    float neighbors = texture2D(uState, vUv - dx).r + texture2D(uState, vUv + dx).r
-      + texture2D(uState, vUv - dy).r + texture2D(uState, vUv + dy).r;
-    float wave = mix(height.r, neighbors * 0.5 - height.g, 0.97) * 0.98;
-
-    // A soft brush follows the entire pointer segment. Fast movement adds more energy.
-    vec2 scale = vec2(uAspect, 1.0);
-    vec2 motion = (uPointer - uPreviousPointer) * scale;
-    float speed = length(motion);
-    if (speed > 0.0001) {
-      vec2 offset = (vUv - uPreviousPointer) * scale;
-      float along = clamp(dot(offset, motion) / dot(motion, motion), 0.0, 1.0);
-      float radius = mix(0.022, 0.032, along);
-      float trail = 1.0 - smoothstep(0.0, radius, length(offset - motion * along));
-      wave += trail * trail * min(speed * 14.0, 1.0) * 0.28;
+    float avg = (
+      texture2D(uPrev, vUv - dx).r + texture2D(uPrev, vUv + dx).r +
+      texture2D(uPrev, vUv - dy).r + texture2D(uPrev, vUv + dy).r
+    ) * 0.25;
+    info.g += (avg - info.r) * 2.0;
+    info.g *= 0.988;
+    info.r += info.g;
+    info.r *= 0.998;
+    for (int i = 0; i < ${MAX_DROPS}; i++) {
+      if (i >= uCount) break;
+      vec4 d = uDrops[i];
+      vec2 diff = (vUv - d.xy) * vec2(uAspect, 1.0);
+      float drop = max(0.0, 1.0 - length(diff) / d.z);
+      drop = 0.5 - cos(drop * PI) * 0.5;
+      info.r += drop * d.w;
     }
-    float tap = 1.0 - smoothstep(0.0, 0.045, length((vUv - uTap.xy) * scale));
-    wave += tap * tap * uTap.z;
-
-    gl_FragColor = vec4(wave, height.r, 0.0, 1.0);
+    gl_FragColor = info;
   }
 `
 
@@ -101,22 +98,23 @@ const renderFrag = /* glsl */ `
   }
 
   void main() {
-    vec2 dx = vec2(uTexel.x, 0.0);
-    vec2 dy = vec2(0.0, uTexel.y);
-    float slopeX = texture2D(uWater, vUv - dx).r - texture2D(uWater, vUv + dx).r;
-    float slopeY = texture2D(uWater, vUv - dy).r - texture2D(uWater, vUv + dy).r;
-    vec3 normal = normalize(vec3(vec2(slopeX, slopeY) * 24.0, 1.0));
-    float bend = length(normal.xy);
-    vec2 distorted = clamp(vUv + normal.xy * vec2(1.0 / uAspect, 1.0) * 0.037, 0.001, 0.999);
+    vec2 tx = vec2(uTexel.x, 0.0);
+    vec2 ty = vec2(0.0, uTexel.y);
+    float h = texture2D(uWater, vUv).r;
+    float hR = texture2D(uWater, vUv + tx).r, hL = texture2D(uWater, vUv - tx).r;
+    float hU = texture2D(uWater, vUv + ty).r, hD = texture2D(uWater, vUv - ty).r;
+    vec3 n = normalize(vec3(-(hR - hL) * 8.0, -(hU - hD) * 8.0, 1.0));
+    float lap = hR + hL + hU + hD - 4.0 * h;
+
+    vec2 distorted = clamp(vUv + n.xy * vec2(1.0 / uAspect, 1.0) * 0.06, 0.001, 0.999);
     vec3 col = waterColor(distorted);
 
-    if (bend > 0.008) {
-      vec3 halfLight = normalize(vec3(0.24, 0.30, 1.0));
-      float specular = pow(max(dot(normal, halfLight), 0.0), 38.0);
-      float fresnel = (1.0 - normal.z) * (1.0 - normal.z);
-      float rippleMask = smoothstep(0.008, 0.14, bend);
-      col += vec3(0.48, 0.88, 0.96) * (specular * 0.27 + fresnel * 0.07) * rippleMask;
-    }
+    // ripple crests focus light, a soft sun glint and rim brightening on the slopes
+    col += vec3(0.45, 0.82, 0.90) * clamp(-lap * 70.0, 0.0, 1.0) * 0.26;
+    vec3 L = normalize(vec3(-0.35, 0.55, 1.0));
+    float spec = pow(max(reflect(-L, n).z, 0.0), 220.0);
+    col += spec * 0.25;
+    col += (1.0 - n.z) * 1.6 * vec3(0.8, 1.0, 1.0);
     gl_FragColor = vec4(mix(col, vec3(0.027, 0.110, 0.145), uScroll * 0.55), 1.0);
   }
 `
@@ -133,19 +131,18 @@ export default class PoolScene {
     this.accumulator = 0
     this.scroll = 0
     this.visible = true
-    this.pointer = new THREE.Vector2()
-    this.pointerInside = false
+    this.drops = []
+    this.pointer = { x: 0, y: 0, px: 0, py: 0, inside: false }
 
     this.simMat = new THREE.ShaderMaterial({
       vertexShader: quadVert,
       fragmentShader: simFrag,
       uniforms: {
-        uState: { value: null },
+        uPrev: { value: null },
         uTexel: { value: new THREE.Vector2() },
         uAspect: { value: 1 },
-        uPointer: { value: this.pointer },
-        uPreviousPointer: { value: new THREE.Vector2() },
-        uTap: { value: new THREE.Vector3() },
+        uDrops: { value: Array.from({ length: MAX_DROPS }, () => new THREE.Vector4()) },
+        uCount: { value: 0 },
       },
     })
     this.renderMat = new THREE.ShaderMaterial({
@@ -167,7 +164,7 @@ export default class PoolScene {
     this.resize()
     this._onMove = this.onMove.bind(this)
     this._onDown = this.onDown.bind(this)
-    this._onLeave = () => { this.pointerInside = false }
+    this._onLeave = () => { this.pointer.inside = false }
     canvas.parentElement.addEventListener('pointermove', this._onMove)
     canvas.parentElement.addEventListener('pointerdown', this._onDown)
     canvas.parentElement.addEventListener('pointerleave', this._onLeave)
@@ -218,16 +215,49 @@ export default class PoolScene {
     this.renderMat.uniforms.uAspect.value = this.aspect
   }
 
-  onMove(e) {
+  // pointer position in uv (0..1)
+  toUv(e) {
     const rect = this.canvas.getBoundingClientRect()
-    this.pointer.set((e.clientX - rect.left) / rect.width, 1 - (e.clientY - rect.top) / rect.height)
-    if (!this.pointerInside) this.simMat.uniforms.uPreviousPointer.value.copy(this.pointer)
-    this.pointerInside = true
+    return { x: (e.clientX - rect.left) / rect.width, y: 1 - (e.clientY - rect.top) / rect.height }
+  }
+
+  onMove(e) {
+    const p = this.toUv(e)
+    const pt = this.pointer
+    if (!pt.inside) { pt.px = p.x; pt.py = p.y }
+    pt.inside = true
+    pt.x = p.x
+    pt.y = p.y
   }
 
   onDown(e) {
-    this.onMove(e)
-    this.simMat.uniforms.uTap.value.set(this.pointer.x, this.pointer.y, 0.27)
+    const p = this.toUv(e)
+    this.addDrop(p.x, p.y, 0.06, 0.36)
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2
+      this.addDrop(p.x + (Math.cos(a) * 0.045) / this.aspect, p.y + Math.sin(a) * 0.045, 0.022, -0.07)
+    }
+  }
+
+  addDrop(x, y, r, strength) {
+    if (this.drops.length < MAX_DROPS) this.drops.push([x, y, r, strength])
+  }
+
+  // soft drops along the pointer's path; faster movement makes bigger waves
+  pointerWake() {
+    const pt = this.pointer
+    if (!pt.inside) return
+    const dx = (pt.x - pt.px) * this.aspect, dy = pt.y - pt.py
+    const v = Math.hypot(dx, dy)
+    if (v > 0.0005) {
+      const steps = Math.min(4, Math.ceil(v / 0.02))
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps
+        this.addDrop(pt.px + (pt.x - pt.px) * t, pt.py + (pt.y - pt.py) * t, 0.02, (Math.min(0.035, v * 0.8) / steps) * 2.2)
+      }
+    }
+    pt.px = pt.x
+    pt.py = pt.y
   }
 
   setScroll(v) { this.scroll = v }
@@ -240,28 +270,33 @@ export default class PoolScene {
       this.raf = requestAnimationFrame(this.loop)
     } else {
       cancelAnimationFrame(this.raf)
-      this.pointerInside = false
+      this.pointer.inside = false
     }
   }
 
   step() {
-    const uniforms = this.simMat.uniforms
-    uniforms.uState.value = this.rtA.texture
+    const u = this.simMat.uniforms
+    u.uPrev.value = this.rtA.texture
+    const n = Math.min(this.drops.length, MAX_DROPS)
+    for (let i = 0; i < n; i++) u.uDrops.value[i].set(...this.drops[i])
+    u.uCount.value = n
     this.renderer.setRenderTarget(this.rtB)
     this.renderer.render(this.simScene, this.camera)
     ;[this.rtA, this.rtB] = [this.rtB, this.rtA]
-    uniforms.uPreviousPointer.value.copy(this.pointer)
-    uniforms.uTap.value.z = 0
+    this.drops.length = 0
   }
 
   loop(now) {
     this.raf = requestAnimationFrame(this.loop)
     if (!this.rtA) return
+    // skip all GPU work while the full-screen menu hides the hero
+    if (document.documentElement.classList.contains('menu-open')) { this.last = now; return }
     const dt = Math.min(Math.max(0, (now - this.last) / 1000), 1 / 20)
     this.last = now
     this.time += dt
     this.accumulator += dt
 
+    this.pointerWake()
     while (this.accumulator >= SIMULATION_STEP) {
       this.step()
       this.accumulator -= SIMULATION_STEP

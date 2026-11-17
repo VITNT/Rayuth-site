@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { SplitText } from 'gsap/SplitText'
 import { gsap, prefersReducedMotion, scroller, scrollToId } from '../lib.js'
 import Magnetic from './Magnetic.jsx'
+import NavLoader from './NavLoader.jsx'
 import { athlete } from '../data.js'
-
-gsap.registerPlugin(SplitText)
 
 const NAV = [
   { label: 'Home', id: '#top' },
@@ -22,11 +20,53 @@ export default function Header({ ready }) {
   const menu = useRef(null)
   const tl = useRef(null)
   const toggle = useRef(null)
+  const loader = useRef(null)
 
   useEffect(() => {
     if (!ready) return
-    gsap.fromTo(root.current.querySelectorAll('.hd-in'), { yPercent: 120 }, { yPercent: 0, duration: 1.2, ease: 'expo.out', stagger: 0.08, delay: 0.35 })
+    gsap.fromTo(root.current.querySelectorAll('.hd-in'), { yPercent: 120 }, {
+      yPercent: 0, duration: 1.2, ease: 'expo.out', stagger: 0.08, delay: 0.35,
+      // un-clip the header buttons once revealed so their magnetic pull isn't cut off by the mask
+      onComplete: () => root.current?.querySelectorAll('.hd-right .mask').forEach((m) => { m.style.overflow = 'visible' }),
+    })
   }, [ready])
+
+  // The logo can't use mix-blend-mode to invert (the fixed header isolates it), so look at what's
+  // actually painted behind it and switch to dark ink over light backgrounds.
+  // Sections can override with data-tone="light|dark".
+  useEffect(() => {
+    const header = root.current
+    const logo = header.querySelector('.logo')
+    const isLight = (rgb) => {
+      const [r, g, b] = rgb.match(/[\d.]+/g).map(Number)
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b > 150
+    }
+    const lightAt = (x, y) => {
+      for (const el of document.elementsFromPoint(x, y)) {
+        if (header.contains(el)) continue
+        // sections can declare their tone when what you see isn't hit-testable (e.g. the WebGL hero)
+        const tone = el.closest('[data-tone]')?.dataset.tone
+        if (tone) return tone === 'light'
+        if (/^(CANVAS|IMG|VIDEO)$/.test(el.tagName)) return false // water / photos read as dark
+        const cs = getComputedStyle(el)
+        if (cs.backgroundImage !== 'none' && !cs.backgroundImage.includes('data:')) return false
+        const bg = cs.backgroundColor
+        const a = bg.startsWith('rgba') ? parseFloat(bg.split(',')[3]) : 1
+        if (bg !== 'transparent' && a > 0.5) return isLight(bg)
+      }
+      return isLight(getComputedStyle(document.body).backgroundColor)
+    }
+    let frame = 0, last = null
+    const check = () => {
+      if (++frame % 6) return // ~10x a second is plenty
+      const r = logo.getBoundingClientRect()
+      // sample the middle and the left edge; light only if both are light
+      const light = lightAt(r.left + 4, r.top + r.height / 2) && lightAt(r.left + r.width / 2, r.top + r.height / 2)
+      if (light !== last) { last = light; header.classList.toggle('on-light', light) }
+    }
+    gsap.ticker.add(check)
+    return () => gsap.ticker.remove(check)
+  }, [])
 
   // hide on scroll down, show on scroll up
   useEffect(() => {
@@ -51,44 +91,11 @@ export default function Header({ ready }) {
     return () => { timeline.revert(); tl.current = null }
   }, [])
 
+  // lets the hero's WebGL water pause while the opaque menu covers it
   useEffect(() => {
-    const motion = gsap.matchMedia()
-    motion.add('(prefers-reduced-motion: no-preference)', () => {
-      const cleanups = Array.from(menu.current.querySelectorAll('.mn-link'), (link) => {
-        const split = SplitText.create(link.querySelector('.mn-label'), {
-          type: 'words,chars', tag: 'span', charsClass: 'mn-char', aria: 'none',
-        })
-        const bounce = gsap.timeline({ paused: true })
-          .to(split.chars, {
-            yPercent: -15, textShadow: '0 0.14em 0.10em rgba(0, 0, 0, 0.4)',
-            duration: 0.14, ease: 'power2.out', stagger: 0.038,
-          })
-          .to(split.chars, {
-            yPercent: 5, textShadow: '0 0.025em 0.05em rgba(0, 0, 0, 0.18)',
-            duration: 0.16, ease: 'power2.in', stagger: 0.038,
-          }, 0.14)
-          .to(split.chars, {
-            yPercent: 0, textShadow: '0 0 0 rgba(0, 0, 0, 0)',
-            duration: 0.24, ease: 'power2.out', stagger: 0.038,
-          }, 0.30)
-
-        const play = (event) => {
-          if (event.pointerType === 'touch' || (event.type === 'focus' && !link.matches(':focus-visible'))) return
-          if (!bounce.isActive()) bounce.restart()
-        }
-        link.addEventListener('pointerenter', play)
-        link.addEventListener('focus', play)
-
-        return () => {
-          link.removeEventListener('pointerenter', play)
-          link.removeEventListener('focus', play)
-          split.revert()
-        }
-      })
-      return () => cleanups.forEach((cleanup) => cleanup())
-    })
-    return () => motion.revert()
-  }, [])
+    document.documentElement.classList.toggle('menu-open', open)
+    return () => document.documentElement.classList.remove('menu-open')
+  }, [open])
 
   useEffect(() => {
     if (open) {
@@ -115,9 +122,27 @@ export default function Header({ ready }) {
   }
 
   const go = (id) => {
+    if (loader.current?.busy) return
     if (open && menu.current.contains(document.activeElement)) toggle.current?.focus()
-    setOpen(false)
-    setTimeout(() => (id === '#top' ? scroller.lenis?.scrollTo(0, { duration: 1.6 }) : scrollToId(id)), 500)
+
+    if (prefersReducedMotion() || !loader.current) {
+      setOpen(false)
+      setTimeout(() => (id === '#top' ? scroller.lenis?.scrollTo(0, { duration: 1.6 }) : scrollToId(id)), 500)
+      return
+    }
+
+    const label = NAV.find((n) => n.id === id)?.label ?? ''
+    loader.current.play(label, () => {
+      // page is fully covered: snap the menu shut and jump straight to the section
+      tl.current?.pause(0)
+      setOpen(false)
+      const target = id === '#top' ? 0 : document.querySelector(id)
+      if (target == null) return
+      if (scroller.lenis) scroller.lenis.scrollTo(target, { immediate: true, force: true })
+      else if (target === 0) window.scrollTo(0, 0)
+      else target.scrollIntoView()
+      setHidden(false)
+    })
   }
 
   return (
@@ -151,7 +176,16 @@ export default function Header({ ready }) {
           {NAV.map(({ id, label }) => (
             <li key={id} className="mn-item">
               <a className="mn-link" href={id} aria-label={label} aria-current={id === activeId ? 'location' : undefined} onClick={(e) => { e.preventDefault(); go(id) }}>
-                <span className="mn-label" aria-hidden="true">{label}</span>
+                <span className="mn-label" aria-hidden="true">
+                  {Array.from(label, (ch, i) => {
+                    const c = ch === ' ' ? '\u00A0' : ch
+                    return (
+                      <span key={i} className="mn-char" style={{ '--i': i }}>
+                        <span className="mn-char-in" data-c={c}>{c}</span>
+                      </span>
+                    )
+                  })}
+                </span>
               </a>
             </li>
           ))}
@@ -161,6 +195,8 @@ export default function Header({ ready }) {
           <span>{athlete.location}</span>
         </div>
       </nav>
+
+      <NavLoader ref={loader} />
     </>
   )
 }
